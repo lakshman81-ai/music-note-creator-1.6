@@ -1,6 +1,7 @@
 
 import { RhythmPattern } from '../components/constants';
 import { NoteEvent } from '../types';
+import { Essentia, EssentiaWASM } from 'essentia.js';
 
 // Krumhansl-Schmuckler Key-Finding Profiles
 const PROFILE_MAJOR = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88];
@@ -13,6 +14,8 @@ export class AudioEngine {
   private dataArray: Uint8Array | null = null;
   private connectedElements = new WeakMap<HTMLMediaElement, MediaElementAudioSourceNode>();
   private activeOscillators = new Set<OscillatorNode | AudioBufferSourceNode>();
+  private essentia: Essentia | null = null;
+  private essentiaInitalized = false;
 
   // Rhythm Engine
   private nextNoteTime: number = 0;
@@ -32,6 +35,17 @@ export class AudioEngine {
         this.dataArray = new Uint8Array(this.analyser.frequencyBinCount);
       }
     }
+  }
+
+  async init() {
+    if (this.essentiaInitalized) {
+      return;
+    }
+    return EssentiaWASM().then((EssentiaWasmModule) => {
+      this.essentia = new Essentia(EssentiaWasmModule);
+      this.essentiaInitalized = true;
+      console.log('[Essentia] Loaded version ' + this.essentia.version);
+    });
   }
 
   async resume() {
@@ -83,39 +97,28 @@ export class AudioEngine {
     return this.dataArray;
   }
 
-  playTone(midiPitch: number, duration: number = 0.5, voice: string = 'piano') {
+  playTone(midiPitch: number, duration: number = 0.5, velocity: number = 100, voice: string = 'piano') {
     if (!this.audioContext || !isFinite(midiPitch) || !isFinite(duration) || duration <= 0) return;
     this.resume();
 
     const now = this.audioContext.currentTime;
     const frequency = 440 * Math.pow(2, (midiPitch - 69) / 12);
     
-    // --- Professional Piano Synthesis ---
-    // Layer 1: Fundamental (Triangle/Sine mix for body)
-    // Layer 2: Harmonics (Sawtooth low pass for richness)
-    // Layer 3: Hammer Attack (Noise burst)
-
     const masterGain = this.audioContext.createGain();
     masterGain.connect(this.audioContext.destination);
     
-    // Dynamic velocity simulation based on duration/pitch (shorter/higher = harder hit usually)
-    const velocity = 0.6; 
-    
-    // Envelope: Fast Attack, Exponential Decay, Sustain level, Release
-    // We simulate a "one-shot" piano note where sustain is the decay tail
+    const gain = velocity / 127;
     const releaseTime = 0.1;
     const sustainTime = duration; 
     
     masterGain.gain.setValueAtTime(0, now);
-    masterGain.gain.linearRampToValueAtTime(velocity, now + 0.015); // Attack
-    masterGain.gain.exponentialRampToValueAtTime(velocity * 0.1, now + sustainTime); // Decay/Sustain
-    masterGain.gain.linearRampToValueAtTime(0, now + sustainTime + releaseTime); // Release
+    masterGain.gain.linearRampToValueAtTime(gain, now + 0.015);
+    masterGain.gain.exponentialRampToValueAtTime(velocity * 0.1, now + sustainTime);
+    masterGain.gain.linearRampToValueAtTime(0, now + sustainTime + releaseTime);
 
-    // 1. Body Oscillator (Triangle - Mellow)
     const osc1 = this.audioContext.createOscillator();
     osc1.type = 'triangle';
     osc1.frequency.setValueAtTime(frequency, now);
-    // Detune slightly for chorus effect
     osc1.detune.setValueAtTime(Math.random() * 4 - 2, now); 
     osc1.connect(masterGain);
     osc1.start(now);
@@ -123,7 +126,6 @@ export class AudioEngine {
     this.activeOscillators.add(osc1);
     osc1.onended = () => this.activeOscillators.delete(osc1);
 
-    // 2. Harmonic Oscillator (Sine - 1 Octave up, lower volume)
     const osc2 = this.audioContext.createOscillator();
     osc2.type = 'sine';
     osc2.frequency.setValueAtTime(frequency * 2, now);
@@ -135,8 +137,7 @@ export class AudioEngine {
     this.activeOscillators.add(osc2);
     osc2.onended = () => this.activeOscillators.delete(osc2);
 
-    // 3. Hammer Noise (Short burst)
-    const bufferSize = this.audioContext.sampleRate * 0.05; // 50ms
+    const bufferSize = this.audioContext.sampleRate * 0.05;
     const buffer = this.audioContext.createBuffer(1, bufferSize, this.audioContext.sampleRate);
     const data = buffer.getChannelData(0);
     for (let i = 0; i < bufferSize; i++) {
@@ -148,14 +149,12 @@ export class AudioEngine {
     noiseFilter.type = 'lowpass';
     noiseFilter.frequency.value = 1000;
     const noiseGain = this.audioContext.createGain();
-    // Short blip envelope
     noiseGain.gain.setValueAtTime(0.15, now);
     noiseGain.gain.exponentialRampToValueAtTime(0.01, now + 0.04);
     
     noise.connect(noiseFilter).connect(noiseGain).connect(masterGain);
     noise.start(now);
     this.activeOscillators.add(noise);
-    // noise stops automatically after buffer
   }
 
   playDrumSound(sound: string, velocity: number) {
@@ -231,359 +230,245 @@ export class AudioEngine {
       return await this.audioContext.decodeAudioData(arrayBuffer);
   }
 
-  /**
-   * Multi-Pass Deep Analysis Engine
-   */
-  analyzeAudioSegment(audioBuffer: AudioBuffer, startTime: number, duration: number): NoteEvent[] {
-      const sampleRate = audioBuffer.sampleRate;
-      const startSample = Math.floor(startTime * sampleRate);
-      const endSample = Math.floor((startTime + duration) * sampleRate);
-      const channelData = audioBuffer.getChannelData(0);
-      const segmentData = channelData.slice(Math.max(0, startSample), Math.min(channelData.length, endSample));
-      
-      const frames: { time: number, frequency: number, confidence: number, volume: number }[] = [];
-      const windowSize = 2048;
-      const hopSize = 441; // ~10ms
+  async analyzeAudio(file: File): Promise<NoteEvent[]> {
+    if (!this.audioContext || !this.essentia) {
+      throw new Error("AudioContext or Essentia not initialized");
+    }
 
-      // PASS 1: Adaptive Signal Processing
-      let rmsSum = 0;
-      for (let i = 0; i < segmentData.length; i += 100) {
-          const val = segmentData[i];
-          rmsSum += val * val;
-      }
-      const avgRMS = Math.sqrt(rmsSum / (segmentData.length / 100));
-      const adaptiveThreshold = Math.max(0.005, avgRMS * 0.2); // Relaxed threshold, let YIN decide
+    const audioBuffer = await this.loadAudioFile(file);
+    const sr = audioBuffer.sampleRate;
+    const channels = audioBuffer.numberOfChannels;
+    const duration = audioBuffer.duration;
+    console.log(`[Transcription] Input: ${file.name}, SR: ${sr}, Channels: ${channels}, Duration: ${duration.toFixed(2)}s`);
 
-      // PASS 2: Frame Extraction (YIN Algorithm)
-      for (let i = 0; i < segmentData.length - windowSize; i += hopSize) {
-          const chunk = segmentData.slice(i, i + windowSize);
-          
-          let sumSq = 0;
-          for (let s = 0; s < chunk.length; s++) sumSq += chunk[s] * chunk[s];
-          const frameRMS = Math.sqrt(sumSq / chunk.length);
+    // NOTE: This implementation is a simplified version of the user's specification.
+    // Key omissions include: source separation, advanced onset/offset detection, and detailed expressive parameter extraction (vibrato, articulation).
+    const MAX_ALLOWED_DURATION = 600;
+    const segments = [];
+    if (duration > MAX_ALLOWED_DURATION) {
+        console.log(`[Transcription] Audio is longer than ${MAX_ALLOWED_DURATION}s, segmenting...`);
+        let currentTime = 0;
+        while (currentTime < duration) {
+            segments.push({ start: currentTime, end: Math.min(currentTime + 30, duration) });
+            currentTime += 25; // 30s segment with 5s overlap
+        }
+    } else {
+        segments.push({ start: 0, end: duration });
+    }
 
-          if (frameRMS > adaptiveThreshold) {
-              const result = this.yinPitchDetection(chunk, sampleRate);
-              if (result.frequency > 0 && result.probability > 0.3) { // Higher confidence floor
-                  frames.push({
-                      time: startTime + (i / sampleRate),
-                      frequency: result.frequency,
-                      confidence: result.probability,
-                      volume: frameRMS
-                  });
-              } else {
-                  frames.push({ time: startTime + (i / sampleRate), frequency: 0, confidence: 0, volume: 0 });
-              }
-          } else {
-              frames.push({ time: startTime + (i / sampleRate), frequency: 0, confidence: 0, volume: 0 });
-          }
-      }
+    let allNotes: NoteEvent[] = [];
+    for (const segment of segments) {
+        const segmentNotes = await this.processSegment(audioBuffer, segment.start, segment.end);
+        allNotes = allNotes.concat(segmentNotes);
+    }
 
-      // PASS 3: Key Estimation
-      const detectedKey = this.detectKey(frames);
-
-      // PASS 4: Smoothing & Segmentation
-      const smoothedFrames = this.smoothFrames(frames);
-      let notes = this.segmentNotes(smoothedFrames, hopSize / sampleRate);
-
-      // PASS 5: Harmonic Quantization
-      notes = this.harmonicQuantization(notes, detectedKey);
-
-      // PASS 6: Rhythmic Cleanup & Grid Snapping (New!)
-      notes = this.cleanupAndQuantize(notes);
-
-      return notes.map((n, i) => ({ ...n, id: `note_${Math.floor(startTime)}_${i}` }));
+    return allNotes;
   }
 
-  private cleanupAndQuantize(notes: NoteEvent[]): NoteEvent[] {
-      if (notes.length === 0) return [];
+  private async processSegment(audioBuffer: AudioBuffer, startTime: number, endTime: number): Promise<NoteEvent[]> {
+    if (!this.essentia) throw new Error("Essentia not initialized");
 
-      // 1. Remove very short "ghost" notes (< 100ms)
-      let cleanNotes = notes.filter(n => n.duration > 0.1);
+    const sr = audioBuffer.sampleRate;
+    const channelData = audioBuffer.getChannelData(0);
 
-      // 2. Rhythmic Quantization (Snap to 1/16th grid approx 125ms)
-      const GRID_SIZE = 0.125; 
-      cleanNotes = cleanNotes.map(n => {
-          // Snap start time
-          const snappedStart = Math.round(n.start_time / GRID_SIZE) * GRID_SIZE;
-          // Snap duration (minimum 1 grid unit)
-          let snappedDuration = Math.round(n.duration / GRID_SIZE) * GRID_SIZE;
-          if (snappedDuration < GRID_SIZE) snappedDuration = GRID_SIZE;
-          
-          return {
-              ...n,
-              start_time: snappedStart,
-              duration: snappedDuration
-          };
-      });
+    const startSample = Math.floor(startTime * sr);
+    const endSample = Math.floor(endTime * sr);
+    const segmentData = channelData.slice(startSample, endSample);
+    const audioVector = this.essentia.arrayToVector(segmentData);
 
-      // 3. Legato Merging (Bridge small gaps)
-      const merged: NoteEvent[] = [];
-      if (cleanNotes.length > 0) merged.push(cleanNotes[0]);
+    const processedVector = this.essentia.HighPass(audioVector, 40, sr).signal;
 
-      for (let i = 1; i < cleanNotes.length; i++) {
-          const prev = merged[merged.length - 1];
-          const curr = cleanNotes[i];
-          
-          // Gap between prev end and curr start
-          const gap = curr.start_time - (prev.start_time + prev.duration);
-          
-          // If gap is tiny (< 0.15s) and pitch is identical, merge them
-          if (gap < 0.15 && Math.abs(prev.midi_pitch - curr.midi_pitch) < 0.1) {
-              prev.duration = (curr.start_time + curr.duration) - prev.start_time;
-          } 
-          // If notes overlap (due to quantization) and pitch is same, merge
-          else if (curr.start_time < prev.start_time + prev.duration && Math.abs(prev.midi_pitch - curr.midi_pitch) < 0.1) {
-               prev.duration = Math.max(prev.duration, (curr.start_time + curr.duration) - prev.start_time);
-          }
-          else {
-              merged.push(curr);
-          }
-      }
+    // Tempo and beat tracking
+    const beatResult = this.essentia.BeatTrackerMultiFeature(processedVector, sr);
+    const beats = this.essentia.vectorToArray(beatResult.ticks);
+    const bpm = beatResult.bpm;
 
-      return merged;
+    console.log(`[Transcription] Estimated BPM: ${bpm.toFixed(2)}`);
+
+    // Multi-pitch estimation using MultiPitchMelodia
+    const pitchResult = this.essentia.MultiPitchMelodia(processedVector, sr);
+    const pitches = this.essentia.vectorToArray(pitchResult.pitch);
+    const pitchConfidence = this.essentia.vectorToArray(pitchResult.pitchConfidence);
+
+    const notes = this.segmentNotesFromMultiPitch(pitches, pitchConfidence, 512 / sr);
+    const voices = this.assignVoices(notes);
+    const quantizedNotes = this.quantizeNotes(voices, beats, bpm);
+    const expressiveNotes = this.extractExpressiveParameters(quantizedNotes, audioVector, sr);
+    const finalNotes = this.applyMusicologicalCorrections(expressiveNotes, processedVector);
+
+    return finalNotes;
   }
 
-  private detectKey(frames: any[]): { root: number, scale: 'major'|'minor', confidence: number } {
-      const chroma = new Array(12).fill(0);
-      let totalWeight = 0;
+  private segmentNotesFromMultiPitch(pitches: number[][], pitchConfidence: number[][], frameDuration: number): NoteEvent[] {
+    const notes: NoteEvent[] = [];
+    const activeNotes: { [key: number]: any } = {};
+    const minNoteDuration = 0.05;
 
-      frames.forEach(f => {
-          if (f.frequency > 0 && f.confidence > 0.3) {
-              const midi = 69 + 12 * Math.log2(f.frequency / 440);
-              const pitchClass = Math.round(midi) % 12;
-              chroma[pitchClass] += f.confidence;
-              totalWeight += f.confidence;
-          }
-      });
+    for (let i = 0; i < pitches.length; i++) {
+        const time = i * frameDuration;
+        const framePitches = new Set(pitches[i].filter(p => p > 0).map((p, j) => ({
+            pitch: 69 + 12 * Math.log2(p / 440),
+            confidence: pitchConfidence[i][j]
+        })));
 
-      if (totalWeight === 0) return { root: 0, scale: 'major', confidence: 0 };
-      const normalizedChroma = chroma.map(v => v / totalWeight);
+        // End notes that are no longer active
+        for (const pitch in activeNotes) {
+            if (![...framePitches].some(p => p.pitch === parseFloat(pitch))) {
+                if (activeNotes[pitch].duration >= minNoteDuration) {
+                    notes.push(activeNotes[pitch]);
+                }
+                delete activeNotes[pitch];
+            }
+        }
 
-      let maxCorr = -Infinity;
-      let bestRoot = 0;
-      let bestScale: 'major' | 'minor' = 'major';
+        // Start new notes or extend existing ones
+        for (const pitch of framePitches) {
+            if (activeNotes[pitch.pitch]) {
+                activeNotes[pitch.pitch].duration += frameDuration;
+            } else {
+                activeNotes[pitch.pitch] = {
+                    id: `gen_${Date.now()}_${notes.length}`,
+                    start_s: time,
+                    duration_s: frameDuration,
+                    midi_note: pitch.pitch,
+                    velocity: 0.8,
+                    confidence: pitch.confidence
+                };
+            }
+        }
+    }
 
-      for (let root = 0; root < 12; root++) {
-          let corr = 0;
-          for (let i = 0; i < 12; i++) {
-              corr += normalizedChroma[(root + i) % 12] * PROFILE_MAJOR[i];
-          }
-          if (corr > maxCorr) { maxCorr = corr; bestRoot = root; bestScale = 'major'; }
-      }
+    // Add any remaining active notes
+    for (const pitch in activeNotes) {
+        if (activeNotes[pitch].duration >= minNoteDuration) {
+            notes.push(activeNotes[pitch]);
+        }
+    }
 
-      for (let root = 0; root < 12; root++) {
-          let corr = 0;
-          for (let i = 0; i < 12; i++) {
-              corr += normalizedChroma[(root + i) % 12] * PROFILE_MINOR[i];
-          }
-          if (corr > maxCorr) { maxCorr = corr; bestRoot = root; bestScale = 'minor'; }
-      }
-
-      return { root: bestRoot, scale: bestScale, confidence: maxCorr };
+    return notes;
   }
 
-  private harmonicQuantization(notes: NoteEvent[], key: { root: number, scale: 'major'|'minor' }): NoteEvent[] {
-      const majorIntervals = [0, 2, 4, 5, 7, 9, 11];
-      const minorIntervals = [0, 2, 3, 5, 7, 8, 10];
-      const intervals = key.scale === 'major' ? majorIntervals : minorIntervals;
+  private assignVoices(notes: NoteEvent[]): NoteEvent[] {
+    const voices: NoteEvent[][] = [];
+    const maxVoices = 4;
+    const pitchTolerance = 2; // semitones
 
-      return notes.map(note => {
-          const rawMidi = note.midi_pitch;
-          const rounded = Math.round(rawMidi);
-          const pitchClass = (rounded - key.root + 12) % 12;
-          const isInScale = intervals.includes(pitchClass);
+    for (const note of notes) {
+        let assigned = false;
+        for (let i = 0; i < voices.length; i++) {
+            const lastNote = voices[i][voices[i].length - 1];
+            if (lastNote && Math.abs(lastNote.midi_note - note.midi_note) <= pitchTolerance) {
+                voices[i].push(note);
+                assigned = true;
+                break;
+            }
+        }
+        if (!assigned && voices.length < maxVoices) {
+            voices.push([note]);
+        }
+    }
 
-          if (isInScale) {
-              return { ...note, midi_pitch: rounded };
-          } else {
-              let bestCandidate = rounded;
-              let minDist = 100;
-              for (let offset = -1; offset <= 1; offset++) {
-                  const candidate = rounded + offset;
-                  const candidatePC = (candidate - key.root + 12) % 12;
-                  if (intervals.includes(candidatePC)) {
-                      const dist = Math.abs(rawMidi - candidate);
-                      if (dist < minDist) {
-                          minDist = dist;
-                          bestCandidate = candidate;
-                      }
-                  }
-              }
-              if (minDist < 0.4) {
-                  return { ...note, midi_pitch: bestCandidate };
-              } else {
-                  return { ...note, midi_pitch: rounded };
-              }
-          }
-      });
+    let result: NoteEvent[] = [];
+    for (let i = 0; i < voices.length; i++) {
+        for (const note of voices[i]) {
+            result.push({ ...note, voice_id: i });
+        }
+    }
+    return result;
   }
 
-  private yinPitchDetection(buffer: Float32Array, sampleRate: number): { frequency: number, probability: number } {
-      const bufferSize = buffer.length;
-      const W = Math.floor(bufferSize / 2); // Integration window
-      const yinBuffer = new Float32Array(W);
+  private quantizeNotes(notes: NoteEvent[], beats: number[], bpm: number): NoteEvent[] {
+    const beatDuration = 60 / bpm;
+    const subdivisions = [1, 0.5, 0.25, 0.125]; // Whole, half, quarter, eighth
 
-      // 1. Difference Function (Optimized)
-      // Using a simplified difference calculation for speed, although O(N^2) is intrinsic to strict YIN
-      for (let tau = 0; tau < W; tau++) {
-          let sum = 0;
-          for (let j = 0; j < W; j++) {
-              const delta = buffer[j] - buffer[j + tau];
-              sum += delta * delta;
-          }
-          yinBuffer[tau] = sum;
-      }
+    return notes.map(note => {
+        const nearestBeat = beats.reduce((prev, curr) => {
+            return (Math.abs(curr - note.start_s) < Math.abs(prev - note.start_s) ? curr : prev);
+        });
 
-      // 2. Cumulative Mean Normalized Difference Function (CMNDF)
-      yinBuffer[0] = 1;
-      let runningSum = 0;
-      for (let tau = 1; tau < W; tau++) {
-          runningSum += yinBuffer[tau];
-          if (runningSum === 0) {
-              yinBuffer[tau] = 1;
-          } else {
-              // The formula is d'(t) = d(t) / ( (1/t) * sum(d(j)) )
-              // which is d(t) * t / sum(d(j))
-              yinBuffer[tau] *= tau / runningSum;
-          }
-      }
+        let quantizedStart = nearestBeat;
+        let minDiff = Infinity;
 
-      // 3. Absolute Threshold Search
-      // We constrain the search to musical frequencies to avoid noise
-      const minFreq = 27.5; // A0
-      const maxFreq = 4186; // C8
-      // tau = fs / freq
-      // minTau corresponds to maxFreq (Small period)
-      // maxTau corresponds to minFreq (Large period)
-      const minTau = Math.max(2, Math.floor(sampleRate / maxFreq));
-      const maxTau = Math.min(W - 2, Math.floor(sampleRate / minFreq));
+        for (const sub of subdivisions) {
+            const subBeatDuration = beatDuration * sub;
+            const numSubBeats = Math.round((note.start_s - nearestBeat) / subBeatDuration);
+            const quantizedTime = nearestBeat + numSubBeats * subBeatDuration;
+            const diff = Math.abs(note.start_s - quantizedTime);
+            if (diff < minDiff) {
+                minDiff = diff;
+                quantizedStart = quantizedTime;
+            }
+        }
 
-      const threshold = 0.15;
-      let tauEstimate = -1;
+        const durationInBeats = note.duration_s / beatDuration;
+        const quantizedDurationInBeats = subdivisions.reduce((prev, curr) => {
+            return (Math.abs(curr - durationInBeats) < Math.abs(prev - durationInBeats) ? curr : prev);
+        });
+        const quantizedDuration = quantizedDurationInBeats * beatDuration;
 
-      // Search for first dip below threshold
-      // This prioritizes higher frequencies (smaller tau), consistent with YIN
-      for (let tau = minTau; tau < maxTau; tau++) {
-          if (yinBuffer[tau] < threshold) {
-              // Found a point below threshold. Find the local minimum.
-              while (tau + 1 < maxTau && yinBuffer[tau + 1] < yinBuffer[tau]) {
-                  tau++;
-              }
-              tauEstimate = tau;
-              break;
-          }
-      }
-
-      // 4. Fallback: Global Minimum
-      // If no candidate met the threshold, find the global minimum within range.
-      // This helps with quiet or noisy signals where the dip isn't perfect but is still the best candidate.
-      if (tauEstimate === -1) {
-          let globalMinVal = 100;
-          let globalMinTau = -1;
-          
-          for (let tau = minTau; tau < maxTau; tau++) {
-              if (yinBuffer[tau] < globalMinVal) {
-                  globalMinVal = yinBuffer[tau];
-                  globalMinTau = tau;
-              }
-          }
-          
-          // Only accept if it's a somewhat periodic signal (e.g. prob > 0.4 => val < 0.6)
-          // If the best dip is 0.8, it's likely noise.
-          if (globalMinVal < 0.6) {
-              tauEstimate = globalMinTau;
-          }
-      }
-
-      if (tauEstimate === -1) {
-          return { frequency: -1, probability: 0 };
-      }
-
-      // 5. Parabolic Interpolation
-      // Refines the integer tau estimate to fractional values for better pitch accuracy
-      let betterTau = tauEstimate;
-      if (tauEstimate > 0 && tauEstimate < W - 1) {
-          const s0 = yinBuffer[tauEstimate - 1];
-          const s1 = yinBuffer[tauEstimate];
-          const s2 = yinBuffer[tauEstimate + 1];
-          const denominator = 2 * (2 * s1 - s2 - s0);
-          if (Math.abs(denominator) > 1e-6) { // Avoid division by zero
-              const adjustment = (s2 - s0) / denominator;
-              betterTau += adjustment;
-          }
-      }
-
-      const probability = 1 - Math.min(1, yinBuffer[tauEstimate]);
-      return { frequency: sampleRate / betterTau, probability };
+        return {
+            ...note,
+            start_s: quantizedStart,
+            duration_s: quantizedDuration,
+            end_s: quantizedStart + quantizedDuration
+        };
+    });
   }
 
-  private smoothFrames(frames: any[]) {
-      const medianWindow = 7;
-      const result = frames.map(f => ({ ...f }));
-      
-      for (let i = 0; i < frames.length; i++) {
-          const start = Math.max(0, i - Math.floor(medianWindow / 2));
-          const end = Math.min(frames.length, i + Math.floor(medianWindow / 2) + 1);
-          const window = frames.slice(start, end).filter(f => f.frequency > 0).map(f => f.frequency);
-          
-          if (window.length > Math.floor(medianWindow / 2)) {
-              window.sort((a, b) => a - b);
-              result[i].frequency = window[Math.floor(window.length / 2)];
-          } else {
-              if (frames[i].frequency > 0 && window.length < 2) result[i].frequency = 0;
-          }
-      }
-      return result;
+  private extractExpressiveParameters(notes: NoteEvent[], audioVector: any, sampleRate: number): NoteEvent[] {
+    if (!this.essentia) return notes;
+
+    return notes.map(note => {
+      const startSample = Math.floor(note.start_s * sampleRate);
+      const endSample = Math.floor(note.end_s * sampleRate);
+      const noteAudio = this.essentia.VectorInput(audioVector.get(startSample, endSample));
+      const rms = this.essentia.RMS(noteAudio.audio).rms;
+
+      // Simple mapping from RMS to MIDI velocity
+      const velocity = Math.min(127, Math.max(0, Math.round(rms * 5 * 127)));
+
+      return {
+        ...note,
+        velocity: velocity,
+      };
+    });
   }
 
-  private segmentNotes(frames: any[], frameDuration: number): NoteEvent[] {
-      const notes: NoteEvent[] = [];
-      let currentNote: any = null;
-      const minNoteDuration = 0.08;
+  private applyMusicologicalCorrections(notes: NoteEvent[], audioVector: any): NoteEvent[] {
+    if (!this.essentia) return notes;
 
-      for (const frame of frames) {
-          if (frame.frequency <= 0) {
-              if (currentNote) {
-                  if (currentNote.duration >= minNoteDuration) notes.push(currentNote);
-                  currentNote = null;
-              }
-              continue;
-          }
+    // Key detection
+    const keyResult = this.essentia.Key(audioVector, true, 4096, 512, 'cosine', 'krumhansl', 1024, 44100);
+    const key = keyResult.key;
+    const scale = keyResult.scale;
 
-          const midiPitch = 69 + 12 * Math.log2(frame.frequency / 440);
-          
-          if (currentNote) {
-              if (Math.abs(currentNote.midi_pitch - midiPitch) < 0.8) {
-                  const totalDuration = currentNote.duration + frameDuration;
-                  currentNote.midi_pitch = (currentNote.midi_pitch * currentNote.duration + midiPitch * frameDuration) / totalDuration;
-                  currentNote.duration = totalDuration;
-                  currentNote.confidence = Math.max(currentNote.confidence, frame.confidence);
-              } else {
-                  if (currentNote.duration >= minNoteDuration) notes.push(currentNote);
-                  currentNote = {
-                      id: `gen_${Date.now()}_${notes.length}`,
-                      start_time: frame.time,
-                      duration: frameDuration,
-                      midi_pitch: midiPitch,
-                      velocity: Math.min(1, frame.volume * 5),
-                      confidence: frame.confidence
-                  };
-              }
-          } else {
-              currentNote = {
-                  id: `gen_${Date.now()}_${notes.length}`,
-                  start_time: frame.time,
-                  duration: frameDuration,
-                  midi_pitch: midiPitch,
-                  velocity: Math.min(1, frame.volume * 5),
-                  confidence: frame.confidence
-              };
-          }
-      }
-      
-      if (currentNote && currentNote.duration >= minNoteDuration) notes.push(currentNote);
-      return notes; // Merging is now handled by cleanupAndQuantize
+    console.log(`[Transcription] Estimated Key: ${key} ${scale}`);
+
+    // Placeholder for more advanced corrections
+    return notes.map(note => {
+      const noteName = this.midiToNoteName(note.midi_note, key);
+      return {
+        ...note,
+        note_name: noteName,
+        quantized_value: 'quarter', // Placeholder
+        cent_offset: 0, // Placeholder
+        vibrato: null, // Placeholder
+        instrument: 'piano', // Placeholder
+      };
+    });
+  }
+
+  private midiToNoteName(midi: number, key: string): string {
+    const noteNamesSharp = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+    const noteNamesFlat = ['C', 'Db', 'D', 'Eb', 'E', 'F', 'Gb', 'G', 'Ab', 'A', 'Bb', 'B'];
+    const octave = Math.floor(midi / 12) - 1;
+    const noteIndex = Math.round(midi) % 12;
+
+    // Simple logic to prefer sharps or flats based on key
+    if (['F', 'Bb', 'Eb', 'Ab', 'Db', 'Gb'].includes(key)) {
+        return noteNamesFlat[noteIndex] + octave;
+    }
+    return noteNamesSharp[noteIndex] + octave;
   }
 }
 

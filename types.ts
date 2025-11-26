@@ -9,12 +9,18 @@ export enum NoteDuration {
 
 export interface NoteEvent {
   id: string;
-  start_time: number; // seconds
-  duration: number; // seconds
-  midi_pitch: number;
-  velocity: number; // 0-1
-  confidence: number; // 0-1
-  selected?: boolean;
+  start_s: number;
+  end_s: number;
+  duration_s: number;
+  midi_note: number;
+  note_name: string;
+  quantized_value: string;
+  velocity: number;
+  cent_offset: number;
+  vibrato: { depth_cents: number; rate_hz: number } | null;
+  instrument: string;
+  voice_id: number;
+  confidence: number;
 }
 
 export interface AudioState {
