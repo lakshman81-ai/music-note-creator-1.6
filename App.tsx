@@ -95,11 +95,18 @@ const generateDeterministicNotes = (videoId: string, startTime: number, endTime:
         if (bassTime < endTime) {
              notes.push({
                 id: `bass_${bar}_1`,
-                start_time: barStart,
-                duration: BAR_DURATION * 0.95, 
-                midi_pitch: getMidiPitch(chordDegree, -2), 
-                velocity: 0.7,
-                confidence: 0.99
+                start_s: barStart,
+                duration_s: BAR_DURATION * 0.95,
+                end_s: barStart + BAR_DURATION * 0.95,
+                midi_note: getMidiPitch(chordDegree, -2),
+                velocity: 89,
+                confidence: 0.99,
+                note_name: '',
+                quantized_value: '',
+                cent_offset: 0,
+                vibrato: null,
+                instrument: '',
+                voice_id: 0
             });
         }
 
@@ -135,11 +142,18 @@ const generateDeterministicNotes = (videoId: string, startTime: number, endTime:
 
                 notes.push({
                     id: `mel_${bar}_${currentBeat}_${Math.floor(rng()*100)}`,
-                    start_time: noteTime,
-                    duration: duration * BEAT_DURATION * 0.95, 
-                    midi_pitch: finalPitch,
-                    velocity: 0.8,
-                    confidence: 0.95
+                    start_s: noteTime,
+                    duration_s: duration * BEAT_DURATION * 0.95,
+                    end_s: noteTime + duration * BEAT_DURATION * 0.95,
+                    midi_note: finalPitch,
+                    velocity: 102,
+                    confidence: 0.95,
+                    note_name: '',
+                    quantized_value: '',
+                    cent_offset: 0,
+                    vibrato: null,
+                    instrument: '',
+                    voice_id: 1
                 });
 
                 lastMelodyPitch = finalPitch;
@@ -148,7 +162,7 @@ const generateDeterministicNotes = (videoId: string, startTime: number, endTime:
         }
     }
 
-    return notes.sort((a,b) => a.start_time - b.start_time);
+    return notes.sort((a,b) => a.start_s - b.start_s);
 };
 
 const generateId = (): string => {
@@ -233,6 +247,7 @@ const App: React.FC = () => {
   const [isRestricted, setIsRestricted] = useState(false); 
   const [isSequencing, setIsSequencing] = useState(false);
   const [sequencerSpeed, setSequencerSpeed] = useState(1.0);
+  const [audioEngineReady, setAudioEngineReady] = useState(false);
   
   const [ytUrl, setYtUrl] = useState('');
   const [ytVideoId, setYtVideoId] = useState<string | null>(null);
@@ -271,6 +286,12 @@ const App: React.FC = () => {
 
   useEffect(() => { notesRef.current = notes; }, [notes]);
   useEffect(() => { sequencerSpeedRef.current = sequencerSpeed; }, [sequencerSpeed]);
+
+  useEffect(() => {
+    audioEngine.init().then(() => {
+        setAudioEngineReady(true);
+    });
+  }, []);
 
   // Handle Rhythm Playback
   useEffect(() => {
@@ -319,19 +340,13 @@ const App: React.FC = () => {
   // --- Logic: Analysis ---
 
   const analyzeSegment = async (index: number, totalDuration: number, force: boolean = false) => {
+    if (audioState.sourceType !== 'youtube') return;
     if (!force && processedSegments.has(index)) return; 
     if (totalDuration === 0) return;
 
-    // RIGOROUS VALIDATION: Do not analyze if file buffer is missing for uploads
-    if (audioState.sourceType === 'file' && !audioBufferRef.current) {
-        showToast("Audio buffer missing. Please reload file.", "error");
-        return;
-    }
-
     setIsProcessing(true);
-    showToast(`Deep Analysis in progress...`, 'loading');
+    showToast(`Generating notes for segment...`, 'loading');
     
-    // Defer to next tick to allow UI to update
     setTimeout(async () => {
         const startTime = index * segmentDuration;
         const endTime = Math.min(startTime + segmentDuration, totalDuration);
@@ -339,12 +354,7 @@ const App: React.FC = () => {
         let newNotes: NoteEvent[] = [];
 
         try {
-            if (audioState.sourceType === 'file' && audioBufferRef.current) {
-                // REAL ANALYSIS: Autocorrelation
-                const realNotes = audioEngine.analyzeAudioSegment(audioBufferRef.current, startTime, segmentDuration);
-                newNotes = realNotes;
-            } else if (audioState.sourceType === 'youtube' && ytVideoId) {
-                // DETERMINISTIC COMPOSITION: Polyphonic Engine seeded by Video ID
+            if (ytVideoId) {
                 newNotes = generateDeterministicNotes(ytVideoId, startTime, endTime, labelSettings.keyboardSize);
             }
         } catch (e) {
@@ -355,20 +365,19 @@ const App: React.FC = () => {
         }
         
         setNotes(prev => {
-            // Remove existing notes in this time range if we are re-generating (force=true)
             let filteredPrev = prev;
             if (force) {
-               filteredPrev = prev.filter(n => n.start_time < startTime || n.start_time >= endTime);
+               filteredPrev = prev.filter(n => n.start_s < startTime || n.start_s >= endTime);
             }
             
             const existingIds = new Set(filteredPrev.map(n => n.id));
             const filteredNew = newNotes.filter(n => !existingIds.has(n.id));
-            return [...filteredPrev, ...filteredNew].sort((a, b) => a.start_time - b.start_time);
+            return [...filteredPrev, ...filteredNew].sort((a, b) => a.start_s - b.start_s);
         });
         
         setProcessedSegments(prev => new Set(prev).add(index));
         setIsProcessing(false);
-        showToast("Perfect Notes Generated", 'success');
+        showToast("Notes Generated for segment", 'success');
 
         const suggestions = SuggestionService.generateSuggestions(newNotes);
         if (suggestions) {
@@ -402,22 +411,40 @@ const App: React.FC = () => {
     } catch (e) { console.warn("History error", e); }
   };
 
-  // Auto-Analyze effect
+  // Auto-Analyze effect for YouTube
   useEffect(() => {
-      // Logic: If duration is set, we are "loaded".
-      // We only proceed if we have a valid buffer (for files) OR a video ID (for YT)
-      const isFileReady = audioState.sourceType === 'file' && !!audioBufferRef.current;
       const isYtReady = audioState.sourceType === 'youtube' && !!ytVideoId && (isPlayerReady || isRestricted);
-
-      if (audioState.duration > 0 && !processedSegments.has(currentSegmentIndex)) {
-          if (isFileReady || isYtReady) {
-              analyzeSegment(currentSegmentIndex, audioState.duration, false);
-          }
+      if (audioState.duration > 0 && !processedSegments.has(currentSegmentIndex) && isYtReady) {
+          analyzeSegment(currentSegmentIndex, audioState.duration, false);
       }
   }, [audioState.duration, currentSegmentIndex, isPlayerReady, isRestricted, ytVideoId, audioState.sourceType]);
 
 
   // --- Handlers ---
+  const analyzeFullAudioFile = async (file: File) => {
+    setIsProcessing(true);
+    showToast(`Deep Analysis in progress... This may take a moment.`, 'loading');
+    try {
+        const allNotes = await audioEngine.analyzeAudio(file);
+        setNotes(allNotes);
+
+        const totalSegments = Math.ceil((audioBufferRef.current?.duration || 0) / segmentDuration);
+        const allSegmentIndices = new Set(Array.from({ length: totalSegments }, (_, i) => i));
+        setProcessedSegments(allSegmentIndices);
+
+        showToast("Notes Generated Successfully", 'success');
+        const suggestions = SuggestionService.generateSuggestions(allNotes);
+        if (suggestions) {
+            setSuggestedSettings(suggestions);
+            setIsSuggestionOpen(true);
+        }
+    } catch (error) {
+        console.error("Analysis failed", error);
+        showToast("An error occurred during analysis.", 'error');
+    } finally {
+        setIsProcessing(false);
+    }
+  };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -426,15 +453,10 @@ const App: React.FC = () => {
       resetSession(undefined); 
       
       try {
-        // Decode audio data for analysis
         const buffer = await audioEngine.loadAudioFile(file);
         audioBufferRef.current = buffer;
-        
         const url = URL.createObjectURL(file);
-        
-        // IMPORTANT: Set to undefined to allow AudioContext to access data from Blob URL
         setAudioCrossOrigin(undefined); 
-
         setAudioState(prev => ({ 
             ...prev, 
             sourceUrl: url, 
@@ -442,10 +464,12 @@ const App: React.FC = () => {
             duration: buffer.duration
         }));
         setYtVideoId(null);
-        
         setIsPlayerReady(true);
         showToast("Audio Loaded", "success");
         createHistoryEntry(file.name, 'file', null, buffer.duration);
+
+        analyzeFullAudioFile(file);
+
       } catch (e) {
         console.error(e);
         showToast("Failed to decode audio file", "error");
@@ -518,12 +542,12 @@ const App: React.FC = () => {
 
         // Calculate notes to play (Moved outside state setter to prevent zombie notes)
         const notesToPlay = notesRef.current.filter(n => 
-            n.start_time >= prevTime && n.start_time < newTime
+            n.start_s >= prevTime && n.start_s < newTime
         );
         
         // Use fresh settings from state if possible, or closure settings
         // Play sound immediately
-        notesToPlay.forEach(n => audioEngine.playTone(n.midi_pitch, n.duration, labelSettings.selectedVoice));
+        notesToPlay.forEach(n => audioEngine.playTone(n.midi_note, n.duration_s, n.velocity, labelSettings.selectedVoice));
 
         // Update UI separately
         setAudioState(prev => ({ ...prev, currentTime: newTime }));
@@ -675,7 +699,7 @@ const App: React.FC = () => {
   const handleNoteClick = (noteId: string) => {
     setSelectedNoteId(noteId);
     const note = notes.find(n => n.id === noteId);
-    if (note) audioEngine.playTone(note.midi_pitch, note.duration, labelSettings.selectedVoice);
+    if (note) audioEngine.playTone(note.midi_note, note.duration_s, note.velocity, labelSettings.selectedVoice);
   };
 
   const handleAcceptSuggestion = () => {
