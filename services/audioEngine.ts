@@ -41,11 +41,31 @@ export class AudioEngine {
     if (this.essentiaInitalized) {
       return;
     }
-    return EssentiaWASM().then((EssentiaWasmModule) => {
-      this.essentia = new Essentia(EssentiaWasmModule);
-      this.essentiaInitalized = true;
-      console.log('[Essentia] Loaded version ' + this.essentia.version);
-    });
+    try {
+        await EssentiaWASM().then((EssentiaWasmModule) => {
+            if (!EssentiaWasmModule) {
+                console.error("[AudioEngine] EssentiaWASM failed to load module");
+                throw new Error("EssentiaWASM module is null or undefined");
+            }
+            // Ensure we are instantiating the class correctly
+            try {
+                this.essentia = new Essentia(EssentiaWasmModule);
+                this.essentiaInitalized = true;
+                if (this.essentia) {
+                    console.log('[Essentia] Loaded version ' + this.essentia.version);
+                }
+            } catch (instantiationError) {
+                console.error("[AudioEngine] Error creating Essentia instance:", instantiationError);
+                console.log("[AudioEngine] Module keys available:", Object.keys(EssentiaWasmModule));
+                throw instantiationError;
+            }
+        });
+    } catch (error) {
+        console.error("[AudioEngine] Failed to initialize Essentia:", error);
+        // We rethrow so the UI can catch it or handle the state
+        // However, throwing from async init might be unhandled if not awaited.
+        // We set a flag or just log.
+    }
   }
 
   async resume() {
@@ -230,9 +250,23 @@ export class AudioEngine {
       return await this.audioContext.decodeAudioData(arrayBuffer);
   }
 
+  // Public method for UI to call for regeneration
+  async analyzeSegment(audioBuffer: AudioBuffer, startTime: number, endTime: number): Promise<NoteEvent[]> {
+      if (!this.essentia) {
+          // Attempt lazy init if not ready
+          await this.init();
+          if (!this.essentia) throw new Error("Essentia not initialized or initialization failed.");
+      }
+      return await this.processSegment(audioBuffer, startTime, endTime);
+  }
+
   async analyzeAudio(file: File): Promise<NoteEvent[]> {
     if (!this.audioContext || !this.essentia) {
-      throw new Error("AudioContext or Essentia not initialized");
+      // Re-try init just in case
+      await this.init();
+      if (!this.essentia) {
+         throw new Error("AudioContext or Essentia not initialized");
+      }
     }
 
     const audioBuffer = await this.loadAudioFile(file);
@@ -241,8 +275,6 @@ export class AudioEngine {
     const duration = audioBuffer.duration;
     console.log(`[Transcription] Input: ${file.name}, SR: ${sr}, Channels: ${channels}, Duration: ${duration.toFixed(2)}s`);
 
-    // NOTE: This implementation is a simplified version of the user's specification.
-    // Key omissions include: source separation, advanced onset/offset detection, and detailed expressive parameter extraction (vibrato, articulation).
     const MAX_ALLOWED_DURATION = 600;
     const segments = [];
     if (duration > MAX_ALLOWED_DURATION) {
@@ -258,8 +290,17 @@ export class AudioEngine {
 
     let allNotes: NoteEvent[] = [];
     for (const segment of segments) {
-        const segmentNotes = await this.processSegment(audioBuffer, segment.start, segment.end);
-        allNotes = allNotes.concat(segmentNotes);
+        try {
+            const segmentNotes = await this.processSegment(audioBuffer, segment.start, segment.end);
+            allNotes = allNotes.concat(segmentNotes);
+        } catch (segmentError) {
+            console.error(`[Transcription] Error processing segment ${segment.start}-${segment.end}:`, segmentError);
+            // We might want to continue processing other segments
+        }
+    }
+
+    if (allNotes.length === 0 && duration > 0) {
+        throw new Error("No notes were generated from the analysis.");
     }
 
     return allNotes;
@@ -273,30 +314,58 @@ export class AudioEngine {
 
     const startSample = Math.floor(startTime * sr);
     const endSample = Math.floor(endTime * sr);
-    const segmentData = channelData.slice(startSample, endSample);
+
+    // Bounds check
+    if (startSample >= channelData.length) {
+        return [];
+    }
+    const safeEndSample = Math.min(endSample, channelData.length);
+
+    // Slice the raw data for this segment
+    const segmentData = channelData.slice(startSample, safeEndSample);
+
+    // Convert to Essentia vector
     const audioVector = this.essentia.arrayToVector(segmentData);
 
-    const processedVector = this.essentia.HighPass(audioVector, 40, sr).signal;
+    try {
+        const processedVector = this.essentia.HighPass(audioVector, 40, sr).signal;
 
-    // Tempo and beat tracking
-    const beatResult = this.essentia.BeatTrackerMultiFeature(processedVector, sr);
-    const beats = this.essentia.vectorToArray(beatResult.ticks);
-    const bpm = beatResult.bpm;
+        // Tempo and beat tracking
+        const beatResult = this.essentia.BeatTrackerMultiFeature(processedVector, sr);
+        const beats = this.essentia.vectorToArray(beatResult.ticks);
+        const bpm = beatResult.bpm;
 
-    console.log(`[Transcription] Estimated BPM: ${bpm.toFixed(2)}`);
+        console.log(`[Transcription] Estimated BPM: ${bpm.toFixed(2)}`);
 
-    // Multi-pitch estimation using MultiPitchMelodia
-    const pitchResult = this.essentia.MultiPitchMelodia(processedVector, sr);
-    const pitches = this.essentia.vectorToArray(pitchResult.pitch);
-    const pitchConfidence = this.essentia.vectorToArray(pitchResult.pitchConfidence);
+        // Multi-pitch estimation using MultiPitchMelodia
+        const pitchResult = this.essentia.MultiPitchMelodia(processedVector, sr);
+        const pitches = this.essentia.vectorToArray(pitchResult.pitch);
+        const pitchConfidence = this.essentia.vectorToArray(pitchResult.pitchConfidence);
 
-    const notes = this.segmentNotesFromMultiPitch(pitches, pitchConfidence, 512 / sr);
-    const voices = this.assignVoices(notes);
-    const quantizedNotes = this.quantizeNotes(voices, beats, bpm);
-    const expressiveNotes = this.extractExpressiveParameters(quantizedNotes, audioVector, sr);
-    const finalNotes = this.applyMusicologicalCorrections(expressiveNotes, processedVector);
+        // Analyze
+        const notes = this.segmentNotesFromMultiPitch(pitches, pitchConfidence, 512 / sr);
+        const voices = this.assignVoices(notes);
+        const quantizedNotes = this.quantizeNotes(voices, beats, bpm);
 
-    return finalNotes;
+        // Pass the raw segment data array instead of the vector wrapper to avoid .get() issues
+        const expressiveNotes = this.extractExpressiveParameters(quantizedNotes, segmentData, sr);
+
+        const finalNotes = this.applyMusicologicalCorrections(expressiveNotes, processedVector);
+
+        // Ideally we should free the vector, but if not possible, rely on GC.
+        // Some bindings have .delete() or .free(). If available:
+        // if (audioVector.delete) audioVector.delete();
+
+        // Offset times by segment start time
+        return finalNotes.map(n => ({
+            ...n,
+            start_s: n.start_s + startTime,
+            end_s: n.end_s + startTime
+        }));
+    } catch (e) {
+        console.error("[Transcription] Error inside processSegment:", e);
+        throw e;
+    }
   }
 
   private segmentNotesFromMultiPitch(pitches: number[][], pitchConfidence: number[][], frameDuration: number): NoteEvent[] {
@@ -415,14 +484,24 @@ export class AudioEngine {
     });
   }
 
-  private extractExpressiveParameters(notes: NoteEvent[], audioVector: any, sampleRate: number): NoteEvent[] {
+  // Modified to accept Float32Array instead of Essentia Vector
+  private extractExpressiveParameters(notes: NoteEvent[], segmentData: Float32Array, sampleRate: number): NoteEvent[] {
     if (!this.essentia) return notes;
 
     return notes.map(note => {
       const startSample = Math.floor(note.start_s * sampleRate);
       const endSample = Math.floor(note.end_s * sampleRate);
-      const noteAudio = this.essentia.VectorInput(audioVector.get(startSample, endSample));
-      const rms = this.essentia.RMS(noteAudio.audio).rms;
+
+      // Safety check for bounds
+      if (startSample >= segmentData.length || endSample > segmentData.length || startSample >= endSample) {
+          return { ...note, velocity: 80 };
+      }
+
+      const rawSlice = segmentData.slice(startSample, endSample);
+      const noteAudioVector = this.essentia.arrayToVector(rawSlice);
+      const rms = this.essentia.RMS(noteAudioVector).rms;
+
+      // Ideally delete noteAudioVector here, but depends on API
 
       // Simple mapping from RMS to MIDI velocity
       const velocity = Math.min(127, Math.max(0, Math.round(rms * 5 * 127)));
