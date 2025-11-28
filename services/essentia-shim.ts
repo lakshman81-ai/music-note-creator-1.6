@@ -33,68 +33,43 @@ if (typeof EssentiaWASMModule !== 'function') {
     }
 }
 
-// EssentiaWASM shim function (Promise-based factory)
-const EssentiaWASM = () => {
-  return new Promise((resolve, reject) => {
-    if (typeof EssentiaWASMModule !== 'function') {
-        // Fallback: It might be an object if already initialized or incorrect import
-        if (typeof EssentiaWASMModule === 'object' && EssentiaWASMModule !== null) {
-             if (EssentiaWASMModule.ready) {
-                 EssentiaWASMModule.ready.then(mod => resolve(mod)).catch(reject);
-                 return;
-             }
-             // It might be the module itself?
-             if (EssentiaWASMModule.EssentiaJS) {
-                 resolve(EssentiaWASMModule);
-                 return;
-             }
-        }
-        const err = new Error(`[Essentia Shim] EssentiaWASMModule is not a function or valid object. Type: ${typeof EssentiaWASMModule}`);
-        console.error(err, EssentiaWASMModule);
-        reject(err);
-        return;
+let Essentia = EssentiaImport;
+
+// Robustly resolve the Essentia class constructor
+// Sometimes bundlers or different builds structure the default export differently
+if (typeof Essentia !== 'function') {
+    if (Essentia.Essentia) {
+        Essentia = Essentia.Essentia;
+    } else if (Essentia.default) {
+        Essentia = Essentia.default;
     }
+}
 
-    try {
-        // Configure the Emscripten module
-        const moduleConfig = {
-            locateFile: (path, scriptDirectory) => {
-                if (path.endsWith('.wasm')) {
-                    // Use absolute path to ensure we load from public root,
-                    // regardless of current URL path.
-                    return '/essentia-wasm.wasm';
-                }
-                return path;
-            },
-            // Hook for runtime initialization
-            onRuntimeInitialized: () => {
-                // This is called when WASM is ready, but the Promise returned by factory
-                // (if it returns one) or the 'ready' property is usually preferred.
-            }
-        };
+if (typeof Essentia !== 'function') {
+    console.error('[Essentia Shim] Failed to resolve Essentia constructor. Raw import:', EssentiaImport);
+}
 
-        const result = EssentiaWASMModule(moduleConfig);
+const EssentiaWASM = () => {
+  return new Promise((resolve) => {
+    // EssentiaWASMModule is the singleton Module object.
+    // It is likely already initializing (run() is called in the source file).
+    // We resolve it immediately (as a Promise-like wrapper).
 
-        // Handle different return types (Promise vs Module object)
-        if (result instanceof Promise) {
-            result.then(moduleInstance => {
-                if (!moduleInstance.EssentiaJS) {
-                    console.warn("[Essentia Shim] Warning: EssentiaJS not found on resolved module. Checking if it needs time...");
-                }
-                resolve(moduleInstance);
-            }).catch(reject);
-        } else if (result && result.ready) {
-            // Emscripten 'ready' promise
-            result.ready.then(moduleInstance => {
-                 resolve(moduleInstance);
-            }).catch(reject);
+    // Check if it's a Promise (some builds are)
+    if (EssentiaWASMModule instanceof Promise) {
+        EssentiaWASMModule.then(resolve);
+    } else {
+        // Resolve with the module object
+        // Ensure onRuntimeInitialized is handled if needed, but usually for this build it's ready or will be
+        if (EssentiaWASMModule && typeof EssentiaWASMModule === 'object') {
+             if (EssentiaWASMModule.ready) {
+                 EssentiaWASMModule.ready.then(() => resolve(EssentiaWASMModule));
+             } else {
+                 resolve(EssentiaWASMModule);
+             }
         } else {
-            // Assume it returns the module object directly (sync) or compatible object
-            resolve(result);
+             resolve(EssentiaWASMModule);
         }
-    } catch (e) {
-        console.error("[Essentia Shim] Error invoking EssentiaWASM factory:", e);
-        reject(e);
     }
   });
 };

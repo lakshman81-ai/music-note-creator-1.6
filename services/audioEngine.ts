@@ -48,16 +48,10 @@ export class AudioEngine {
                 return;
             }
             // Ensure we are instantiating the class correctly
-            try {
-                this.essentia = new Essentia(EssentiaWasmModule);
-                this.essentiaInitalized = true;
-                if (this.essentia) {
-                    console.log('[Essentia] Loaded version ' + this.essentia.version);
-                }
-            } catch (instantiationError) {
-                console.error("Error creating Essentia instance:", instantiationError);
-                console.log("Module keys:", Object.keys(EssentiaWasmModule));
-                // Optionally try to find EssentiaJS if buried
+            this.essentia = new Essentia(EssentiaWasmModule);
+            this.essentiaInitalized = true;
+            if (this.essentia) {
+                console.log('[Essentia] Loaded version ' + this.essentia.version);
             }
         });
     } catch (error) {
