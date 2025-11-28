@@ -277,8 +277,17 @@ export class AudioEngine {
 
     let allNotes: NoteEvent[] = [];
     for (const segment of segments) {
-        const segmentNotes = await this.processSegment(audioBuffer, segment.start, segment.end);
-        allNotes = allNotes.concat(segmentNotes);
+        try {
+            const segmentNotes = await this.processSegment(audioBuffer, segment.start, segment.end);
+            allNotes = allNotes.concat(segmentNotes);
+        } catch (segmentError) {
+            console.error(`[Transcription] Error processing segment ${segment.start}-${segment.end}:`, segmentError);
+            // We might want to continue processing other segments
+        }
+    }
+
+    if (allNotes.length === 0 && duration > 0) {
+        throw new Error("No notes were generated from the analysis.");
     }
 
     return allNotes;
@@ -298,19 +307,28 @@ export class AudioEngine {
     // Convert to Essentia vector
     const audioVector = this.essentia.arrayToVector(segmentData);
 
-    const processedVector = this.essentia.HighPass(audioVector, 40, sr).signal;
+    try {
+        const processedVector = this.essentia.HighPass(audioVector, 40, sr).signal;
 
-    // Tempo and beat tracking
-    const beatResult = this.essentia.BeatTrackerMultiFeature(processedVector, sr);
-    const beats = this.essentia.vectorToArray(beatResult.ticks);
-    const bpm = beatResult.bpm;
+        // Tempo and beat tracking
+        const beatResult = this.essentia.BeatTrackerMultiFeature(processedVector, sr);
+        const beats = this.essentia.vectorToArray(beatResult.ticks);
+        const bpm = beatResult.bpm;
 
-    console.log(`[Transcription] Estimated BPM: ${bpm.toFixed(2)}`);
+        console.log(`[Transcription] Estimated BPM: ${bpm.toFixed(2)}`);
 
-    // Multi-pitch estimation using MultiPitchMelodia
-    const pitchResult = this.essentia.MultiPitchMelodia(processedVector, sr);
-    const pitches = this.essentia.vectorToArray(pitchResult.pitch);
-    const pitchConfidence = this.essentia.vectorToArray(pitchResult.pitchConfidence);
+        // Multi-pitch estimation using MultiPitchMelodia
+        const pitchResult = this.essentia.MultiPitchMelodia(processedVector, sr);
+        const pitches = this.essentia.vectorToArray(pitchResult.pitch);
+        const pitchConfidence = this.essentia.vectorToArray(pitchResult.pitchConfidence);
+
+        // Analyze
+        const notes = this.segmentNotesFromMultiPitch(pitches, pitchConfidence, 512 / sr);
+        const voices = this.assignVoices(notes);
+        const quantizedNotes = this.quantizeNotes(voices, beats, bpm);
+
+        // Pass the raw segment data array instead of the vector wrapper to avoid .get() issues
+        const expressiveNotes = this.extractExpressiveParameters(quantizedNotes, segmentData, sr);
 
     // Analyze
     const notes = this.segmentNotesFromMultiPitch(pitches, pitchConfidence, 512 / sr);

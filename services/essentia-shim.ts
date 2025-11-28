@@ -2,15 +2,15 @@
 // @ts-ignore
 import EssentiaImport from 'essentia.js/dist/essentia.js-core.es.js';
 // @ts-ignore
-import EssentiaWASMModule from 'essentia.js/dist/essentia-wasm.web.js';
+import EssentiaWASMModuleImport from 'essentia.js/dist/essentia-wasm.web.js';
 
 // The 'essentia.js' main entry point uses a UMD build that depends on Node.js built-ins (fs, path, crypto).
 // This causes build warnings and runtime crashes in browser environments like Google AI Studio.
 // To fix this, we import the ES/Web builds directly, which are browser-compatible.
 
-// However, the Web/ES builds export the initialized Module object directly (or via IIFE),
-// whereas the UMD build exports a factory function. The app code expects a factory function.
-// We create a shim factory here.
+// 1. Resolve Essentia Class
+// Ensure we handle default exports and named exports correctly
+let Essentia = EssentiaImport;
 
 let Essentia = EssentiaImport;
 
