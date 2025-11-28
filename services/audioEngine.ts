@@ -14,7 +14,7 @@ export class AudioEngine {
   private dataArray: Uint8Array | null = null;
   private connectedElements = new WeakMap<HTMLMediaElement, MediaElementAudioSourceNode>();
   private activeOscillators = new Set<OscillatorNode | AudioBufferSourceNode>();
-  private essentia: Essentia | null = null;
+  private essentia: any | null = null;
   private essentiaInitalized = false;
 
   // Rhythm Engine
@@ -330,31 +330,27 @@ export class AudioEngine {
         // Pass the raw segment data array instead of the vector wrapper to avoid .get() issues
         const expressiveNotes = this.extractExpressiveParameters(quantizedNotes, segmentData, sr);
 
-    // Analyze
-    const notes = this.segmentNotesFromMultiPitch(pitches, pitchConfidence, 512 / sr);
-    const voices = this.assignVoices(notes);
-    const quantizedNotes = this.quantizeNotes(voices, beats, bpm);
+        const finalNotes = this.applyMusicologicalCorrections(expressiveNotes, processedVector);
 
-    // Pass the raw segment data array instead of the vector wrapper to avoid .get() issues
-    const expressiveNotes = this.extractExpressiveParameters(quantizedNotes, segmentData, sr);
+        // Clean up WASM memory
+        // (Ideally we should delete vectors but Essentia JS might handle some,
+        // explicit delete is safer if we knew the C++ pointer, but here we just rely on GC/Essentia handling)
+        // this.essentia.delete(audioVector); // Not all Essentia JS bindings support explicit delete easily without leaking
 
-    const finalNotes = this.applyMusicologicalCorrections(expressiveNotes, processedVector);
-
-    // Clean up WASM memory
-    // (Ideally we should delete vectors but Essentia JS might handle some,
-    // explicit delete is safer if we knew the C++ pointer, but here we just rely on GC/Essentia handling)
-    // this.essentia.delete(audioVector); // Not all Essentia JS bindings support explicit delete easily without leaking
-
-    // Offset times by segment start time
-    return finalNotes.map(n => ({
-        ...n,
-        start_s: n.start_s + startTime,
-        end_s: n.end_s + startTime
-    }));
+        // Offset times by segment start time
+        return finalNotes.map(n => ({
+            ...n,
+            start_s: n.start_s + startTime,
+            end_s: n.end_s + startTime
+        }));
+    } catch (e) {
+        console.error("Analysis failed for segment", e);
+        return [];
+    }
   }
 
-  private segmentNotesFromMultiPitch(pitches: number[][], pitchConfidence: number[][], frameDuration: number): NoteEvent[] {
-    const notes: NoteEvent[] = [];
+  private segmentNotesFromMultiPitch(pitches: number[][], pitchConfidence: number[][], frameDuration: number): Partial<NoteEvent>[] {
+    const notes: Partial<NoteEvent>[] = [];
     const activeNotes: { [key: number]: any } = {};
     const minNoteDuration = 0.05;
 
@@ -402,8 +398,8 @@ export class AudioEngine {
     return notes;
   }
 
-  private assignVoices(notes: NoteEvent[]): NoteEvent[] {
-    const voices: NoteEvent[][] = [];
+  private assignVoices(notes: Partial<NoteEvent>[]): Partial<NoteEvent>[] {
+    const voices: Partial<NoteEvent>[][] = [];
     const maxVoices = 4;
     const pitchTolerance = 2; // semitones
 
@@ -411,6 +407,7 @@ export class AudioEngine {
         let assigned = false;
         for (let i = 0; i < voices.length; i++) {
             const lastNote = voices[i][voices[i].length - 1];
+            // Check if midi_note is defined before using it
             if (lastNote && Math.abs(lastNote.midi_note - note.midi_note) <= pitchTolerance) {
                 voices[i].push(note);
                 assigned = true;
@@ -422,7 +419,7 @@ export class AudioEngine {
         }
     }
 
-    let result: NoteEvent[] = [];
+    let result: Partial<NoteEvent>[] = [];
     for (let i = 0; i < voices.length; i++) {
         for (const note of voices[i]) {
             result.push({ ...note, voice_id: i });
@@ -431,7 +428,7 @@ export class AudioEngine {
     return result;
   }
 
-  private quantizeNotes(notes: NoteEvent[], beats: number[], bpm: number): NoteEvent[] {
+  private quantizeNotes(notes: Partial<NoteEvent>[], beats: number[], bpm: number): Partial<NoteEvent>[] {
     const beatDuration = 60 / bpm;
     const subdivisions = [1, 0.5, 0.25, 0.125]; // Whole, half, quarter, eighth
 
@@ -470,10 +467,13 @@ export class AudioEngine {
   }
 
   // Modified to accept Float32Array instead of Essentia Vector
-  private extractExpressiveParameters(notes: NoteEvent[], segmentData: Float32Array, sampleRate: number): NoteEvent[] {
+  private extractExpressiveParameters(notes: Partial<NoteEvent>[], segmentData: Float32Array, sampleRate: number): Partial<NoteEvent>[] {
     if (!this.essentia) return notes;
 
     return notes.map(note => {
+      // Ensure start_s and end_s are present
+      if (note.start_s === undefined || note.end_s === undefined) return note;
+
       const startSample = Math.floor(note.start_s * sampleRate);
       const endSample = Math.floor(note.end_s * sampleRate);
 
@@ -498,8 +498,8 @@ export class AudioEngine {
     });
   }
 
-  private applyMusicologicalCorrections(notes: NoteEvent[], audioVector: any): NoteEvent[] {
-    if (!this.essentia) return notes;
+  private applyMusicologicalCorrections(notes: Partial<NoteEvent>[], audioVector: any): NoteEvent[] {
+    if (!this.essentia) return [];
 
     // Key detection
     const keyResult = this.essentia.Key(audioVector, true, 4096, 512, 'cosine', 'krumhansl', 1024, 44100);
@@ -510,14 +510,24 @@ export class AudioEngine {
 
     // Placeholder for more advanced corrections
     return notes.map(note => {
-      const noteName = this.midiToNoteName(note.midi_note, key);
+      // Fill in defaults for missing values to satisfy NoteEvent interface
+      const midiNote = note.midi_note || 60; // Default Middle C if missing
+      const noteName = this.midiToNoteName(midiNote, key);
+
       return {
-        ...note,
+        id: note.id || `note_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+        start_s: note.start_s || 0,
+        end_s: note.end_s || 0.5,
+        duration_s: note.duration_s || 0.5,
+        midi_note: midiNote,
         note_name: noteName,
-        quantized_value: 'quarter', // Placeholder
-        cent_offset: 0, // Placeholder
-        vibrato: null, // Placeholder
-        instrument: 'piano', // Placeholder
+        quantized_value: note.quantized_value || 'quarter',
+        velocity: note.velocity || 80,
+        cent_offset: note.cent_offset || 0,
+        vibrato: note.vibrato || null,
+        instrument: note.instrument || 'piano',
+        voice_id: note.voice_id || 0,
+        confidence: note.confidence || 1.0
       };
     });
   }
