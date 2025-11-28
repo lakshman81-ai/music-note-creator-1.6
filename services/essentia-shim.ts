@@ -8,9 +8,7 @@ import EssentiaWASMModule from 'essentia.js/dist/essentia-wasm.web.js';
 // This causes build warnings and runtime crashes in browser environments like Google AI Studio.
 // To fix this, we import the ES/Web builds directly, which are browser-compatible.
 
-// However, the Web/ES builds export the initialized Module object directly (or via IIFE),
-// whereas the UMD build exports a factory function. The app code expects a factory function.
-// We create a shim factory here.
+let Essentia = EssentiaImport;
 
 let Essentia = EssentiaImport;
 
