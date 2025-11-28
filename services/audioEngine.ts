@@ -44,27 +44,18 @@ export class AudioEngine {
     try {
         await EssentiaWASM().then((EssentiaWasmModule) => {
             if (!EssentiaWasmModule) {
-                console.error("[AudioEngine] EssentiaWASM failed to load module");
-                throw new Error("EssentiaWASM module is null or undefined");
+                console.error("EssentiaWASM failed to load module");
+                return;
             }
             // Ensure we are instantiating the class correctly
-            try {
-                this.essentia = new Essentia(EssentiaWasmModule);
-                this.essentiaInitalized = true;
-                if (this.essentia) {
-                    console.log('[Essentia] Loaded version ' + this.essentia.version);
-                }
-            } catch (instantiationError) {
-                console.error("[AudioEngine] Error creating Essentia instance:", instantiationError);
-                console.log("[AudioEngine] Module keys available:", Object.keys(EssentiaWasmModule));
-                throw instantiationError;
+            this.essentia = new Essentia(EssentiaWasmModule);
+            this.essentiaInitalized = true;
+            if (this.essentia) {
+                console.log('[Essentia] Loaded version ' + this.essentia.version);
             }
         });
     } catch (error) {
-        console.error("[AudioEngine] Failed to initialize Essentia:", error);
-        // We rethrow so the UI can catch it or handle the state
-        // However, throwing from async init might be unhandled if not awaited.
-        // We set a flag or just log.
+        console.error("Failed to initialize Essentia:", error);
     }
   }
 
@@ -252,11 +243,7 @@ export class AudioEngine {
 
   // Public method for UI to call for regeneration
   async analyzeSegment(audioBuffer: AudioBuffer, startTime: number, endTime: number): Promise<NoteEvent[]> {
-      if (!this.essentia) {
-          // Attempt lazy init if not ready
-          await this.init();
-          if (!this.essentia) throw new Error("Essentia not initialized or initialization failed.");
-      }
+      if (!this.essentia) throw new Error("Essentia not initialized");
       return await this.processSegment(audioBuffer, startTime, endTime);
   }
 
@@ -314,15 +301,8 @@ export class AudioEngine {
 
     const startSample = Math.floor(startTime * sr);
     const endSample = Math.floor(endTime * sr);
-
-    // Bounds check
-    if (startSample >= channelData.length) {
-        return [];
-    }
-    const safeEndSample = Math.min(endSample, channelData.length);
-
     // Slice the raw data for this segment
-    const segmentData = channelData.slice(startSample, safeEndSample);
+    const segmentData = channelData.slice(startSample, endSample);
 
     // Convert to Essentia vector
     const audioVector = this.essentia.arrayToVector(segmentData);
@@ -350,22 +330,27 @@ export class AudioEngine {
         // Pass the raw segment data array instead of the vector wrapper to avoid .get() issues
         const expressiveNotes = this.extractExpressiveParameters(quantizedNotes, segmentData, sr);
 
-        const finalNotes = this.applyMusicologicalCorrections(expressiveNotes, processedVector);
+    // Analyze
+    const notes = this.segmentNotesFromMultiPitch(pitches, pitchConfidence, 512 / sr);
+    const voices = this.assignVoices(notes);
+    const quantizedNotes = this.quantizeNotes(voices, beats, bpm);
 
-        // Ideally we should free the vector, but if not possible, rely on GC.
-        // Some bindings have .delete() or .free(). If available:
-        // if (audioVector.delete) audioVector.delete();
+    // Pass the raw segment data array instead of the vector wrapper to avoid .get() issues
+    const expressiveNotes = this.extractExpressiveParameters(quantizedNotes, segmentData, sr);
 
-        // Offset times by segment start time
-        return finalNotes.map(n => ({
-            ...n,
-            start_s: n.start_s + startTime,
-            end_s: n.end_s + startTime
-        }));
-    } catch (e) {
-        console.error("[Transcription] Error inside processSegment:", e);
-        throw e;
-    }
+    const finalNotes = this.applyMusicologicalCorrections(expressiveNotes, processedVector);
+
+    // Clean up WASM memory
+    // (Ideally we should delete vectors but Essentia JS might handle some,
+    // explicit delete is safer if we knew the C++ pointer, but here we just rely on GC/Essentia handling)
+    // this.essentia.delete(audioVector); // Not all Essentia JS bindings support explicit delete easily without leaking
+
+    // Offset times by segment start time
+    return finalNotes.map(n => ({
+        ...n,
+        start_s: n.start_s + startTime,
+        end_s: n.end_s + startTime
+    }));
   }
 
   private segmentNotesFromMultiPitch(pitches: number[][], pitchConfidence: number[][], frameDuration: number): NoteEvent[] {
