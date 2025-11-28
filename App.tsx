@@ -340,13 +340,13 @@ const App: React.FC = () => {
   // --- Logic: Analysis ---
 
   const analyzeSegment = async (index: number, totalDuration: number, force: boolean = false) => {
-    if (audioState.sourceType !== 'youtube') return;
     if (!force && processedSegments.has(index)) return; 
     if (totalDuration === 0) return;
 
     setIsProcessing(true);
     showToast(`Generating notes for segment...`, 'loading');
     
+    // We use a small timeout to let the UI update (toast show up) before heavy processing if synchronous
     setTimeout(async () => {
         const startTime = index * segmentDuration;
         const endTime = Math.min(startTime + segmentDuration, totalDuration);
@@ -354,8 +354,10 @@ const App: React.FC = () => {
         let newNotes: NoteEvent[] = [];
 
         try {
-            if (ytVideoId) {
+            if (audioState.sourceType === 'youtube' && ytVideoId) {
                 newNotes = generateDeterministicNotes(ytVideoId, startTime, endTime, labelSettings.keyboardSize);
+            } else if (audioState.sourceType === 'file' && audioBufferRef.current) {
+                newNotes = await audioEngine.analyzeSegment(audioBufferRef.current, startTime, endTime);
             }
         } catch (e) {
             console.error(e);
@@ -367,6 +369,7 @@ const App: React.FC = () => {
         setNotes(prev => {
             let filteredPrev = prev;
             if (force) {
+               // If forcing regeneration, remove old notes in this range
                filteredPrev = prev.filter(n => n.start_s < startTime || n.start_s >= endTime);
             }
             
@@ -385,7 +388,7 @@ const App: React.FC = () => {
             setIsSuggestionOpen(true);
         }
         
-    }, 500);
+    }, 100);
   };
 
   const createHistoryEntry = (title: string, sourceType: 'file' | 'youtube', sourceUrl: string | null, duration: number) => {
