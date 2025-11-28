@@ -1,7 +1,7 @@
 
 import { RhythmPattern } from '../components/constants';
 import { NoteEvent } from '../types';
-import { Essentia, EssentiaWASM } from 'essentia.js';
+import { Essentia, EssentiaWASM } from './essentia-shim';
 
 // Krumhansl-Schmuckler Key-Finding Profiles
 const PROFILE_MAJOR = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88];
