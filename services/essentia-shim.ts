@@ -10,7 +10,10 @@ import EssentiaWASMModule from 'essentia.js/dist/essentia-wasm.web.js';
 
 let Essentia = EssentiaImport;
 
+let Essentia = EssentiaImport;
+
 // Robustly resolve the Essentia class constructor
+// Sometimes bundlers or different builds structure the default export differently
 if (typeof Essentia !== 'function') {
     if (Essentia.Essentia) {
         Essentia = Essentia.Essentia;
@@ -23,49 +26,27 @@ if (typeof Essentia !== 'function') {
     console.error('[Essentia Shim] Failed to resolve Essentia constructor. Raw import:', EssentiaImport);
 }
 
-// EssentiaWASM factory function
 const EssentiaWASM = () => {
-  return new Promise((resolve, reject) => {
-    // Check if EssentiaWASMModule is the factory function itself
-    if (typeof EssentiaWASMModule === 'function') {
-        // In browser, this returns a Promise that resolves to the module
-        try {
-            const result = EssentiaWASMModule({
-                // Add any necessary configuration here if needed
-                // For example, locating the wasm file
-                locateFile: (path) => {
-                    if (path.endsWith('.wasm')) {
-                        return 'essentia-wasm.wasm'; // Assuming we moved it to public root
-                    }
-                    return path;
-                }
-            });
+  return new Promise((resolve) => {
+    // EssentiaWASMModule is the singleton Module object.
+    // It is likely already initializing (run() is called in the source file).
+    // We resolve it immediately (as a Promise-like wrapper).
 
-            if (result instanceof Promise) {
-                result.then(resolve).catch(reject);
-            } else if (result && result.ready) {
-                result.ready.then(() => resolve(result));
-            } else {
-                resolve(result);
-            }
-        } catch (e) {
-            console.error("EssentiaWASM factory invocation failed:", e);
-            reject(e);
-        }
-    }
-    // Check if it's already an object (initialized module or promise)
-    else if (EssentiaWASMModule instanceof Promise) {
-        EssentiaWASMModule.then(resolve).catch(reject);
-    }
-    else if (typeof EssentiaWASMModule === 'object') {
-        if (EssentiaWASMModule.ready) {
-             EssentiaWASMModule.ready.then(() => resolve(EssentiaWASMModule)).catch(reject);
+    // Check if it's a Promise (some builds are)
+    if (EssentiaWASMModule instanceof Promise) {
+        EssentiaWASMModule.then(resolve);
+    } else {
+        // Resolve with the module object
+        // Ensure onRuntimeInitialized is handled if needed, but usually for this build it's ready or will be
+        if (EssentiaWASMModule && typeof EssentiaWASMModule === 'object') {
+             if (EssentiaWASMModule.ready) {
+                 EssentiaWASMModule.ready.then(() => resolve(EssentiaWASMModule));
+             } else {
+                 resolve(EssentiaWASMModule);
+             }
         } else {
              resolve(EssentiaWASMModule);
         }
-    } else {
-        console.error("Unknown EssentiaWASMModule type:", typeof EssentiaWASMModule, EssentiaWASMModule);
-        reject(new Error("Unknown EssentiaWASMModule type"));
     }
   });
 };
