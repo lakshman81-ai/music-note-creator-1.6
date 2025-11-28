@@ -1,6 +1,6 @@
 
 // @ts-ignore
-import Essentia from 'essentia.js/dist/essentia.js-core.es.js';
+import EssentiaImport from 'essentia.js/dist/essentia.js-core.es.js';
 // @ts-ignore
 import EssentiaWASMModule from 'essentia.js/dist/essentia-wasm.web.js';
 
@@ -12,22 +12,43 @@ import EssentiaWASMModule from 'essentia.js/dist/essentia-wasm.web.js';
 // whereas the UMD build exports a factory function. The app code expects a factory function.
 // We create a shim factory here.
 
+let Essentia = EssentiaImport;
+
+// Robustly resolve the Essentia class constructor
+// Sometimes bundlers or different builds structure the default export differently
+if (typeof Essentia !== 'function') {
+    if (Essentia.Essentia) {
+        Essentia = Essentia.Essentia;
+    } else if (Essentia.default) {
+        Essentia = Essentia.default;
+    }
+}
+
+if (typeof Essentia !== 'function') {
+    console.error('[Essentia Shim] Failed to resolve Essentia constructor. Raw import:', EssentiaImport);
+}
+
 const EssentiaWASM = () => {
   return new Promise((resolve) => {
     // EssentiaWASMModule is the singleton Module object.
     // It is likely already initializing (run() is called in the source file).
     // We resolve it immediately (as a Promise-like wrapper).
-    // Note: If WASM loading is async, accessing it immediately *might* be too early,
-    // but typically the app waits for user interaction or further async steps.
-    // Ideally we would hook onRuntimeInitialized, but since the module is already executed,
-    // we might have missed the event.
 
     // Check if it's a Promise (some builds are)
     if (EssentiaWASMModule instanceof Promise) {
         EssentiaWASMModule.then(resolve);
     } else {
         // Resolve with the module object
-        resolve(EssentiaWASMModule);
+        // Ensure onRuntimeInitialized is handled if needed, but usually for this build it's ready or will be
+        if (EssentiaWASMModule && typeof EssentiaWASMModule === 'object') {
+             if (EssentiaWASMModule.ready) {
+                 EssentiaWASMModule.ready.then(() => resolve(EssentiaWASMModule));
+             } else {
+                 resolve(EssentiaWASMModule);
+             }
+        } else {
+             resolve(EssentiaWASMModule);
+        }
     }
   });
 };

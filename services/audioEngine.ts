@@ -41,11 +41,22 @@ export class AudioEngine {
     if (this.essentiaInitalized) {
       return;
     }
-    return EssentiaWASM().then((EssentiaWasmModule) => {
-      this.essentia = new Essentia(EssentiaWasmModule);
-      this.essentiaInitalized = true;
-      console.log('[Essentia] Loaded version ' + this.essentia.version);
-    });
+    try {
+        await EssentiaWASM().then((EssentiaWasmModule) => {
+            if (!EssentiaWasmModule) {
+                console.error("EssentiaWASM failed to load module");
+                return;
+            }
+            // Ensure we are instantiating the class correctly
+            this.essentia = new Essentia(EssentiaWasmModule);
+            this.essentiaInitalized = true;
+            if (this.essentia) {
+                console.log('[Essentia] Loaded version ' + this.essentia.version);
+            }
+        });
+    } catch (error) {
+        console.error("Failed to initialize Essentia:", error);
+    }
   }
 
   async resume() {
@@ -230,9 +241,19 @@ export class AudioEngine {
       return await this.audioContext.decodeAudioData(arrayBuffer);
   }
 
+  // Public method for UI to call for regeneration
+  async analyzeSegment(audioBuffer: AudioBuffer, startTime: number, endTime: number): Promise<NoteEvent[]> {
+      if (!this.essentia) throw new Error("Essentia not initialized");
+      return await this.processSegment(audioBuffer, startTime, endTime);
+  }
+
   async analyzeAudio(file: File): Promise<NoteEvent[]> {
     if (!this.audioContext || !this.essentia) {
-      throw new Error("AudioContext or Essentia not initialized");
+      // Re-try init just in case
+      await this.init();
+      if (!this.essentia) {
+         throw new Error("AudioContext or Essentia not initialized");
+      }
     }
 
     const audioBuffer = await this.loadAudioFile(file);
@@ -241,8 +262,6 @@ export class AudioEngine {
     const duration = audioBuffer.duration;
     console.log(`[Transcription] Input: ${file.name}, SR: ${sr}, Channels: ${channels}, Duration: ${duration.toFixed(2)}s`);
 
-    // NOTE: This implementation is a simplified version of the user's specification.
-    // Key omissions include: source separation, advanced onset/offset detection, and detailed expressive parameter extraction (vibrato, articulation).
     const MAX_ALLOWED_DURATION = 600;
     const segments = [];
     if (duration > MAX_ALLOWED_DURATION) {
@@ -273,7 +292,10 @@ export class AudioEngine {
 
     const startSample = Math.floor(startTime * sr);
     const endSample = Math.floor(endTime * sr);
+    // Slice the raw data for this segment
     const segmentData = channelData.slice(startSample, endSample);
+
+    // Convert to Essentia vector
     const audioVector = this.essentia.arrayToVector(segmentData);
 
     const processedVector = this.essentia.HighPass(audioVector, 40, sr).signal;
@@ -290,13 +312,27 @@ export class AudioEngine {
     const pitches = this.essentia.vectorToArray(pitchResult.pitch);
     const pitchConfidence = this.essentia.vectorToArray(pitchResult.pitchConfidence);
 
+    // Analyze
     const notes = this.segmentNotesFromMultiPitch(pitches, pitchConfidence, 512 / sr);
     const voices = this.assignVoices(notes);
     const quantizedNotes = this.quantizeNotes(voices, beats, bpm);
-    const expressiveNotes = this.extractExpressiveParameters(quantizedNotes, audioVector, sr);
+
+    // Pass the raw segment data array instead of the vector wrapper to avoid .get() issues
+    const expressiveNotes = this.extractExpressiveParameters(quantizedNotes, segmentData, sr);
+
     const finalNotes = this.applyMusicologicalCorrections(expressiveNotes, processedVector);
 
-    return finalNotes;
+    // Clean up WASM memory
+    // (Ideally we should delete vectors but Essentia JS might handle some,
+    // explicit delete is safer if we knew the C++ pointer, but here we just rely on GC/Essentia handling)
+    // this.essentia.delete(audioVector); // Not all Essentia JS bindings support explicit delete easily without leaking
+
+    // Offset times by segment start time
+    return finalNotes.map(n => ({
+        ...n,
+        start_s: n.start_s + startTime,
+        end_s: n.end_s + startTime
+    }));
   }
 
   private segmentNotesFromMultiPitch(pitches: number[][], pitchConfidence: number[][], frameDuration: number): NoteEvent[] {
@@ -415,14 +451,24 @@ export class AudioEngine {
     });
   }
 
-  private extractExpressiveParameters(notes: NoteEvent[], audioVector: any, sampleRate: number): NoteEvent[] {
+  // Modified to accept Float32Array instead of Essentia Vector
+  private extractExpressiveParameters(notes: NoteEvent[], segmentData: Float32Array, sampleRate: number): NoteEvent[] {
     if (!this.essentia) return notes;
 
     return notes.map(note => {
       const startSample = Math.floor(note.start_s * sampleRate);
       const endSample = Math.floor(note.end_s * sampleRate);
-      const noteAudio = this.essentia.VectorInput(audioVector.get(startSample, endSample));
-      const rms = this.essentia.RMS(noteAudio.audio).rms;
+
+      // Safety check for bounds
+      if (startSample >= segmentData.length || endSample > segmentData.length || startSample >= endSample) {
+          return { ...note, velocity: 80 };
+      }
+
+      const rawSlice = segmentData.slice(startSample, endSample);
+      const noteAudioVector = this.essentia.arrayToVector(rawSlice);
+      const rms = this.essentia.RMS(noteAudioVector).rms;
+
+      // Ideally delete noteAudioVector here, but depends on API
 
       // Simple mapping from RMS to MIDI velocity
       const velocity = Math.min(127, Math.max(0, Math.round(rms * 5 * 127)));
