@@ -12,9 +12,9 @@ export const SuggestionService = {
       return null;
     }
 
-    const averagePitch = notes.reduce((sum, note) => sum + note.midi_pitch, 0) / notes.length;
-    const averageDuration = notes.reduce((sum, note) => sum + note.duration, 0) / notes.length;
-    const noteDensity = notes.length / (notes[notes.length - 1].start_time - notes[0].start_time);
+    const averagePitch = notes.reduce((sum, note) => sum + note.midi_note, 0) / notes.length;
+    const averageDuration = notes.reduce((sum, note) => sum + note.duration_s, 0) / notes.length;
+    const noteDensity = notes.length / (notes[notes.length - 1].start_s - notes[0].start_s);
 
     if (averagePitch < 48 && averageDuration > 0.4) {
       return {

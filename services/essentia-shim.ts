@@ -12,8 +12,6 @@ import EssentiaWASMModuleImport from 'essentia.js/dist/essentia-wasm.web.js';
 // Ensure we handle default exports and named exports correctly
 let Essentia = EssentiaImport;
 
-let Essentia = EssentiaImport;
-
 // Robustly resolve the Essentia class constructor
 // Sometimes bundlers or different builds structure the default export differently
 if (typeof Essentia !== 'function') {
@@ -35,19 +33,19 @@ const EssentiaWASM = () => {
     // We resolve it immediately (as a Promise-like wrapper).
 
     // Check if it's a Promise (some builds are)
-    if (EssentiaWASMModule instanceof Promise) {
-        EssentiaWASMModule.then(resolve);
+    if (EssentiaWASMModuleImport instanceof Promise) {
+        EssentiaWASMModuleImport.then(resolve);
     } else {
         // Resolve with the module object
         // Ensure onRuntimeInitialized is handled if needed, but usually for this build it's ready or will be
-        if (EssentiaWASMModule && typeof EssentiaWASMModule === 'object') {
-             if (EssentiaWASMModule.ready) {
-                 EssentiaWASMModule.ready.then(() => resolve(EssentiaWASMModule));
+        if (EssentiaWASMModuleImport && typeof EssentiaWASMModuleImport === 'object') {
+             if (EssentiaWASMModuleImport.ready) {
+                 EssentiaWASMModuleImport.ready.then(() => resolve(EssentiaWASMModuleImport));
              } else {
-                 resolve(EssentiaWASMModule);
+                 resolve(EssentiaWASMModuleImport);
              }
         } else {
-             resolve(EssentiaWASMModule);
+             resolve(EssentiaWASMModuleImport);
         }
     }
   });
